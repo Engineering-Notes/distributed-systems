@@ -1,0 +1,78 @@
+name: CI
+
+# Finds every article folder (two digits, a dash, a name) and runs `npm ci && npm test` in each,
+# with PostgreSQL 16 available. New folders are picked up without editing this file.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      folders: ${{ steps.list.outputs.folders }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: |
+          folders=$(find . -maxdepth 1 -type d -regex './[0-9][0-9]-.*' -exec test -f '{}/package.json' ';' -print | sed 's#./##' | sort | jq -R . | jq -sc .)
+          echo "folders=$folders" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    if: needs.discover.outputs.folders != '[]'
+    name: ${{ matrix.folder }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJson(needs.discover.outputs.folders) }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: notes
+          POSTGRES_PASSWORD: notes
+          POSTGRES_DB: notes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notes"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://notes:notes@localhost:5432/notes
+    defaults:
+      run:
+        working-directory: ${{ matrix.folder }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.folder }}/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  ci-passed:
+    name: ci-passed
+    if: always()
+    needs: [discover, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every article passed
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'
